@@ -8,12 +8,12 @@
  *    · 全部效果都能在 @media print 里被压平（见 style.css 打印段）
  *
  *  它只做五件事：
- *    1. 给左列 10 张卡注入折叠开关 + 已选摘要；默认全部收起，由用户自己展开
+ *    1. 给配置卡注入折叠开关与已选摘要；默认展开核心填写，记住用户偏好
  *    2. 用 IntersectionObserver 高亮当前正在看的卡片
  *    3. 把配置列里冗长的 .note 说明收成两行 + ⓘ 展开（结果列的说明不动，
  *       因为那是"答案的一部分"，折叠它反而有害）
- *    4. 移动端底部常驻条，同步显示推荐瓦数
- *    5. 精简使用须知弹窗（启动后展示，也可主动打开）
+ *    4. 响应式与结果状态由 app.js 同步
+ *    5. 使用须知由用户主动打开
  *
  *  在 head 加载以决定首帧；DOMContentLoaded 初始化时 app.js 已渲染 DOM。
  * ==========================================================================*/
@@ -25,11 +25,8 @@
   /* ------------------------------------------------------------ 配置 --- */
   var LS_KEY = 'psu-calc-2026-v1-ui';
 
-  /* 默认展开的卡片序号。空数组 = 打开页面时所有选项都收起来，
-     由用户自己点开需要填的那几步。
-     注意这里给的是「默认值」：用户手动展开过的那张卡会记在 localStorage 里，
-     下次打开保持用户自己的状态，不会又被强行收起。 */
-  var ALWAYS_OPEN = [];
+  // 默认展开用途、CPU 和显卡；其余保留用户的折叠偏好。
+  var ALWAYS_OPEN = [1, 2, 3];
 
   // 折叠态摘要：按卡片序号读对应控件的当前值
   var SUMMARY_RULES = {
@@ -140,7 +137,7 @@
     var no = 0;
     Array.prototype.forEach.call(col.querySelectorAll('section.card'), function (sec) {
       if (sec.id === 'guideCard') return;
-      no++;
+      no = +(sec.querySelector('.idx') || {}).textContent || no + 1;
       var h2 = sec.querySelector('h2');
       var path = SEC_ICON[no];
       if (!h2 || !path || h2.querySelector('.sec-ico')) return;
@@ -163,7 +160,7 @@
 
     Array.prototype.forEach.call(sections, function (sec) {
       if (sec.id === 'guideCard') return;   // 引导卡有自己的关闭按钮
-      no++;
+      no = +(sec.querySelector('.idx') || {}).textContent || no + 1;
 
       var h2 = sec.querySelector('h2');
       if (!h2) return;
@@ -214,7 +211,7 @@
       var rec = { el: sec, no: no, summaryEl: sum, toggleEl: btn };
       cards.push(rec);
 
-      // 初始状态：优先用记忆值，否则按 ALWAYS_OPEN 决定（现在是全部收起）
+      // 初始状态：优先用记忆值，否则展开核心填写
       var remembered = state['c' + no];
       var open = (remembered === undefined) ? (ALWAYS_OPEN.indexOf(no) !== -1) : !!remembered;
       setCollapsed(sec, btn, !open);
@@ -305,37 +302,6 @@
     });
   }
 
-  function setupMobileBar() {
-    var bar = $('mobileBar');
-    var out = $('mobileBarValue');
-    var chip = $('answerChip');
-    var src = $('answerChipValue') || $('recoBig');
-    if (!bar || !out || !src) return;
-
-    function sync() {
-      if (chip && chip.hidden) { bar.hidden = true; return; }
-      var t = (src.textContent || '').replace(/\s+/g, ' ').trim();
-      // 保留数字、区间连接符（- – ~ ～）、小数点与 W
-      var clean = t.replace(/[^\d\-–~～.W\s]/g, '').trim();
-      if (!/\d/.test(clean)) { bar.hidden = true; return; }
-      var html = escHtml(clean) + (/W/.test(clean) ? '' : '<span> W</span>');
-      if (out.innerHTML !== html) out.innerHTML = html;
-      if (bar.hidden) bar.hidden = false;
-    }
-
-    if ('MutationObserver' in window) {
-      new MutationObserver(sync).observe(src, {
-        childList: true, characterData: true, subtree: true
-      });
-      if (chip) {
-        new MutationObserver(sync).observe(chip, {
-          attributes: true, attributeFilter: ['hidden'], childList: true, subtree: true
-        });
-      }
-    }
-    sync();
-  }
-
   /* -------------------------------------------------------- 数据声明 ----
      打开页面时自动出现的声明弹窗。原来的「数据来源」卡片与显卡卡里的两段
      声明都搬进了这里，所以 id="sources" / id="aibCatalogNote" 都还在原位
@@ -353,52 +319,39 @@
     var xBtn = $('dmClose');
     var lastFocus = null;
     var closeTimer = null;
-    /* 是不是「启动结束后自动弹出」的那一次。
-       只有这一次的关闭才需要在背后把卡片逐个放出来；用户从顶栏重开再关不该重播。 */
-    var openedAuto = false;
-    var never = $('dmNever');
-    var preferenceKey = 'psu-calc-2026-v1-disclaimer';
-    /* 「不再提示」只在本次会话（这一个标签页）内有效。
-       原来存 localStorage：一次误勾就永久生效，而启动动画是每个标签页只播一次 ——
-       两者对不上，结果是动画照旧在播、说明却再也不出现，用户看到的就是
-       「启动完直接进界面」。存 sessionStorage 后，每个标签页至少完整走一遍
-       「动画 → 说明 → 关掉 → 依次显现」。 */
-    try { if (localStorage.getItem(preferenceKey) !== null) localStorage.removeItem(preferenceKey); } catch (e) {}
-    function version() { return window.HWDB && window.HWDB.meta.version || '1'; }
-    /* hash 里现在还会放配置短码（#c=…），所以按 token 判断，
-       不能再拿 location.hash 跟 '#nodisclaimer' 整体比较。 */
-    function hashHas(token) {
-      return (location.hash || '').replace(/^#/, '').split('&').indexOf(token) !== -1;
-    }
-    function suppressed() {
-      if (new URLSearchParams(location.search).get('nodisclaimer') === '1' || hashHas('nodisclaimer')) return true;
-      try { return sessionStorage.getItem(preferenceKey) === version(); } catch (e) { return false; }
-    }
-
     function isOpen() { return !m.hidden; }
+    function announce(type) { document.dispatchEvent(new Event(type)); }
 
-    /* 两个事件把「弹窗开合」广播给启动流程（ui.js 第二个 IIFE）：
-       psu:disclaimer-open / psu:disclaimer-closed，detail.auto 标明是不是自动弹出的那次。 */
-    function announce(type) {
-      document.dispatchEvent(new CustomEvent(type, { detail: { auto: openedAuto } }));
+    /* 弹窗打开时把背景整片标 inert。
+       已有的手写 Tab 陷阱只拦得住 Tab 键，拦不住读屏的虚拟光标 ——
+       它照样能读到底层那二十几个控件和整张配置表单，对屏幕阅读器用户来说
+       弹窗等于没生效。inert 才是真正的隔离。
+       只记录并解除自己动过的节点，免得和启动序列那套 inert 互相解除。 */
+    var inertNodes = [];
+    function holdBackground() {
+      Array.prototype.forEach.call(document.body.children, function (el) {
+        if (el === m || el.matches('script, noscript, style') || el.inert) return;
+        el.inert = true;
+        inertNodes.push(el);
+      });
+    }
+    function releaseBackground() {
+      inertNodes.forEach(function (el) { el.inert = false; });
+      inertNodes = [];
     }
 
-    /* 「不再提示」是会话内的偏好，勾选框必须反映它的真实状态。
-       不回填的话这个开关就是单向的：一旦记住，用户再打开弹窗看到的仍是
-       「不勾选」的样子，点确定也只会……什么都不会发生，于是再也关不掉。 */
-    function syncNever() {
-      if (!never) return;
-      try { never.checked = sessionStorage.getItem(preferenceKey) === version(); } catch (e) {}
-    }
-
-    function open(fromAuto) {
-      if (closeTimer) { clearTimeout(closeTimer); closeTimer = null; m.classList.remove('is-closing'); return; }
+    function open() {
+      if (closeTimer) {
+        clearTimeout(closeTimer); closeTimer = null; m.classList.remove('is-closing');
+        if (window.__PSU_MOTION__) window.__PSU_MOTION__.surface(m.querySelector('.modal-card'), true);
+        return;
+      }
       if (isOpen()) return;
-      openedAuto = !!fromAuto;
-      syncNever();
       lastFocus = document.activeElement;
       m.hidden = false;
       document.body.classList.add('modal-open');
+      holdBackground();
+      if (window.__PSU_MOTION__) window.__PSU_MOTION__.surface(m.querySelector('.modal-card'), true);
       if (body) body.scrollTop = 0;
       if (okBtn) { try { okBtn.focus({ preventScroll: true }); } catch (e) { okBtn.focus(); } }
       announce('psu:disclaimer-open');
@@ -406,17 +359,17 @@
 
     function close() {
       if (!isOpen() || closeTimer) return;
-      if (never) {
-        try {
-          if (never.checked) sessionStorage.setItem(preferenceKey, version());
-          else sessionStorage.removeItem(preferenceKey);   // 取消勾选要能真的取消
-        } catch (e) {}
-      }
       function finishClose() {
+        if (m.hidden) return;
+        clearTimeout(closeTimer);
         closeTimer = null;
         m.hidden = true;
+        if (window.__PSU_MOTION__) window.__PSU_MOTION__.stop(m.querySelector('.modal-card'));
         m.classList.remove('is-closing');
         document.body.classList.remove('modal-open');
+        /* 必须在恢复焦点之前解除：lastFocus 多半在背景里，
+           还带着 inert 的话 focus() 会被拒绝，焦点就丢了。 */
+        releaseBackground();
         if (lastFocus && lastFocus.focus) {
           try { lastFocus.focus({ preventScroll: true }); } catch (e) {}
         }
@@ -426,7 +379,8 @@
       if (matchMedia('(prefers-reduced-motion: reduce)').matches) finishClose();
       else {
         m.classList.add('is-closing');
-        closeTimer = setTimeout(finishClose, 160);
+        if (window.__PSU_MOTION__) window.__PSU_MOTION__.surface(m.querySelector('.modal-card'), false);
+        closeTimer = setTimeout(finishClose, 180);
       }
     }
 
@@ -454,13 +408,34 @@
       else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
     });
 
-    function autoOpen() { if (!suppressed()) open(true); }
-    if (document.documentElement.classList.contains('psu-boot-active')) {
-      document.addEventListener('psu:boot-end', autoOpen, { once: true });
-    } else autoOpen();
+    // 使用须知由页内入口主动打开，首次填写不再被弹窗阻塞。
 
     // 供自动化测试 / 其他脚本调用
     window.__PSU_DISCLAIMER__ = { open: open, close: close, isOpen: isOpen };
+  }
+
+  function setupHeaderMore() {
+    var more = document.querySelector('details.header-more');
+    if (!more) return;
+    function closeMore(focusSummary) {
+      var motion = window.__PSU_MOTION__;
+      if (motion && motion.closeDetails && motion.closeDetails(more, focusSummary)) return;
+      more.open = false;
+      if (focusSummary) {
+        var sum = more.querySelector('summary');
+        if (sum && sum.focus) sum.focus();
+      }
+    }
+    document.addEventListener('pointerdown', function (e) {
+      if (more.open && !more.contains(e.target)) closeMore(false);
+    });
+    document.addEventListener('keydown', function (e) {
+      if (more.open && (e.key === 'Escape' || e.key === 'Esc')) closeMore(true);
+    });
+    more.addEventListener('click', function (e) {
+      var btn = e.target.closest('button');
+      if (btn && btn.id !== 'btnLightEffects') closeMore(false);
+    });
   }
 
   /* ------------------------------------------------------------ 启动 --- */
@@ -470,8 +445,8 @@
       setupCards();
       setupActiveHighlight();
       collapseNotes();
-      setupMobileBar();
       setupDisclaimer();
+      setupHeaderMore();
 
       // 控件值变化 → 刷新摘要
       // 用捕获阶段监听，不影响 app.js 自己的监听器
@@ -501,10 +476,7 @@
   }
 })();
 
-/* 一次性启动，分两段：
-   ① 原生 Canvas V2 动画 → 遮罩退场、框架淡入 → 声明弹窗接管；
-   ② 用户关掉声明之后，左右两栏的卡片按 DOM 顺序依次弹出。
-   跳过、失败、打印与减少动态效果都必须能立刻恢复到常态页面。 */
+/* 首访开场可随时跳过，结束后立即恢复表单；须知由用户主动打开。 */
 (function () {
   'use strict';
   var root = document.documentElement;
@@ -516,46 +488,38 @@
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', settleInitialLayout, { once: true });
   else settleInitialLayout();
-  /* 启动动画同一台机器上 24 小时内只放一次。
-     原来存 sessionStorage（每个新标签页都重来），开几个标签就要看几遍 4 秒黑屏；
-     但也不能永久记住 —— 那等于永远看不到。取 24 小时这个中间值。 */
-  var key = 'psu-boot-seen-native-v4';
-  var SEEN_TTL = 24 * 60 * 60 * 1000;
+  // 首次访问播放一次，后续可从顶栏重播。
+  var key = 'psu-boot-seen-lightning-video-v7';
   var motion = window.matchMedia('(prefers-reduced-motion: reduce)');
+  var print = window.matchMedia('print');
   var seen = false;
   try {
-    var seenAt = parseInt(localStorage.getItem(key), 10);
-    seen = !isNaN(seenAt) && (Date.now() - seenAt) < SEEN_TTL;
+    seen = localStorage.getItem(key) === '1';
+    localStorage.removeItem('psu-boot-seen-native-v4');
   } catch (e) {}
 
   // 硬跳过：这些入口下连「就位隐藏」都不做，页面必须原样可用。
-  if (window.__PSU_NOANIM || new URLSearchParams(location.search).get('noanim') === '1' ||
-      motion.matches || window.matchMedia('print').matches) return;
+  if (window.__PSU_NOANIM || new URLSearchParams(location.search).get('noanim') === '1' || print.matches) return;
 
-  /* 声明关掉之后才依次出现的整页块：顶栏 → 页首引导语 → 左栏配置卡 →
-     右栏结果块（推荐电源、三个数字、各卡）→ 反馈入口。
-     取的是 DOM 顺序，也就是从上到下、先左后右。
-     间隔与 @keyframes psu-content-in 的 .36s 对齐，改一处要改两处。 */
+  // 暴露页面区域供浏览器检查验证可见性。
   var ITEM_SELECTOR = [
     'header.top',
     '.page-intro',
+    '.decision-toolbar',
     '.col-config > .card',
     '.col-result .sticky-col > *:not(.print-only)',
     'details.section-collapse'
   ].join(', ');
-  var STAGGER_MS = 45;
-  var ITEM_MS = 360;
 
   /* 测试侧从这里读选择器，省得两边各抄一份然后慢慢走散。 */
   window.__PSU_BOOT__ = {
     itemSelector: ITEM_SELECTOR,
-    items: function () { return Array.prototype.slice.call(document.querySelectorAll(ITEM_SELECTOR)); }
+    items: function () { return Array.prototype.slice.call(document.querySelectorAll(ITEM_SELECTOR)); },
+    replay: replayIntro
   };
-  /* 同一会话里已经看过动画：这次不放黑幕，「关掉声明再逐个弹出」照常。
-     刷新一下就整段失效，是这套东西最容易踩空的地方。 */
-  var introRan = !seen;
+  var introRan = !seen && !motion.matches;
   if (introRan) root.classList.add('psu-boot-active', 'psu-boot-pending');
-  var done = false, staged = false, timers = [], inertNodes = [], items = [], stopAnimation = null;
+  var done = false, staged = false, hadVideo = false, timers = [], inertNodes = [], stopAnimation = null;
   var inputEvents = ['pointerdown', 'click', 'keydown', 'touchstart'];
 
   function later(fn, ms) { timers.push(setTimeout(fn, ms)); }
@@ -577,128 +541,605 @@
   function detachInput() {
     inputEvents.forEach(function (type) { document.removeEventListener(type, onSkip, true); });
   }
-  function clearItems() {
-    items.forEach(function (el) {
-      el.classList.remove('psu-boot-item');
-      el.style.removeProperty('--psu-boot-delay');
-    });
-    items = [];
-  }
-
-  /* 收尾：清掉全部启动期类名，页面回到常态。
-     只有延迟交给声明弹窗的那条路径需要额外派发 psu:boot-end 把弹窗叫起来。 */
+  // 结束或跳过开场时恢复页面与输入。
   function release(dispatchEnd) {
     if (done) return;
     done = true;
     if (stopAnimation) { stopAnimation(); stopAnimation = null; }
     clearTimers();
-    clearItems();
     root.classList.remove('psu-boot-active', 'psu-boot-pending', 'psu-boot-running',
-      'psu-boot-hold', 'psu-boot-fill');
+      'psu-boot-hold', 'psu-boot-fill', 'psu-boot-replaying');
     releaseInput();
     detachInput();
-    document.removeEventListener('psu:disclaimer-closed', onDisclaimerClosed);
     motion.removeEventListener('change', onMotion);
     window.removeEventListener('beforeprint', onAbort);
     window.removeEventListener('pagehide', onAbort);
     document.removeEventListener('visibilitychange', onVisibility);
-    try { localStorage.setItem(key, String(Date.now())); } catch (e) {}
+    try { localStorage.setItem(key, '1'); } catch (e) {}
     if (dispatchEnd) document.dispatchEvent(new Event('psu:boot-end'));
   }
 
-  /* 第一段收束：遮罩退场、框架淡入，把页面交给声明弹窗。
-     卡片在这里就位（先压成不可见 + 排好各自的延时），但先不播放。 */
-  function enterDialogStage(event) {
+  function finishIntro(event) {
     if (done || staged) return;
     staged = true;
-    // 跳过手势不穿透到页面按钮或随后出现的声明弹窗。
+    var shouldReveal = hadVideo;
+    hadVideo = false;
+    // 跳过手势不穿透到页面按钮。
     if (event && inputEvents.indexOf(event.type) !== -1) {
       if (event.cancelable) event.preventDefault();
       event.stopImmediatePropagation();
     }
     if (stopAnimation) { stopAnimation(); stopAnimation = null; }
-    // 10 秒兜底就此作废：声明看多久由用户决定，不能把动画一并收走。
+    // 正常结束后取消加载超时兜底。
     clearTimers();
     detachInput();
     root.classList.remove('psu-boot-active', 'psu-boot-pending', 'psu-boot-running');
-    // 这里不再单独放「框架淡入」：顶栏与两栏的每一块都进了就位名单，
-    // 关掉声明后由 psu-content-in 逐块带出来，再加一层淡入只会互相打架。
-    releaseInput();
-    root.classList.add('psu-boot-hold');
-    items = Array.prototype.slice.call(document.querySelectorAll(ITEM_SELECTOR));
-    items.forEach(function (el, i) {
-      el.classList.add('psu-boot-item');
-      el.style.setProperty('--psu-boot-delay', (i * STAGGER_MS) + 'ms');
-    });
-    document.dispatchEvent(new Event('psu:boot-end'));
-    var d = window.__PSU_DISCLAIMER__;
-    if (d && d.isOpen()) document.addEventListener('psu:disclaimer-closed', onDisclaimerClosed);
-    else playFill();  // 声明被抑制（?nodisclaimer=1 / 不再提示）时不留白，直接逐个弹出
+    release(true);
+    if (shouldReveal && window.__PSU_MOTION__ && window.__PSU_MOTION__.revealPage) {
+      window.__PSU_MOTION__.revealPage(!!event);
+    }
   }
 
-  /* 第二段：卡片依次弹出，最后一张落位后收尾。 */
-  function playFill() {
-    if (done) return;
-    document.removeEventListener('psu:disclaimer-closed', onDisclaimerClosed);
-    if (!items.length || motion.matches) { release(false); return; }
-    root.classList.add('psu-boot-fill');
-    later(function () { release(false); }, (items.length - 1) * STAGGER_MS + ITEM_MS + 80);
-  }
-
-  function onDisclaimerClosed(event) {
-    if (!event.detail || !event.detail.auto) return;
-    playFill();
-  }
-  function onSkip(event) { enterDialogStage(event); }
+  function onSkip(event) { finishIntro(event); }
   function onMotion(event) { if (event.matches) release(true); }
   function onAbort() { release(true); }
   function onVisibility() { if (document.hidden) release(true); }
 
-  inputEvents.forEach(function (type) {
-    document.addEventListener(type, onSkip, { capture: true, passive: false });
-  });
-  motion.addEventListener('change', onMotion);
-  window.addEventListener('beforeprint', onAbort);
-  window.addEventListener('pagehide', onAbort);
-  document.addEventListener('visibilitychange', onVisibility);
-  // 数据脚本下载异常时也不留下永久黑幕。
-  later(function () { release(true); }, 10000);
+  function watchPlayback(manual) {
+    inputEvents.forEach(function (type) {
+      document.addEventListener(type, onSkip, { capture: true, passive: false });
+    });
+    motion.addEventListener('change', onMotion);
+    window.addEventListener('beforeprint', onAbort);
+    window.addEventListener('pagehide', onAbort);
+    document.addEventListener('visibilitychange', onVisibility);
+    // 手动重播给慢网留出缓冲时间，自动开场继续快速放行页面。
+    later(function () { release(true); }, manual ? 30000 : 10000);
+  }
 
   function start() {
     if (done) return;
     if (window.__PSU_NOANIM || motion.matches) { release(true); return; }
     var canvas = document.querySelector('.psu-boot-canvas');
-    // 没有动画可放（本会话已看过 / 取不到 canvas / 脚本缺失）也照样走第二段：
-    // 声明弹窗一出就把卡片就位，用户关掉它时依然逐个弹出。
-    if (!introRan || !canvas || !window.startLightningBoot) { enterDialogStage(null); return; }
+    // 回访或缺少动画脚本时直接显示页面。
+    if (!introRan || !canvas || !window.startLightningBoot) { finishIntro(null); return; }
     holdInput();
+    hadVideo = true;
     root.classList.add('psu-boot-running');
-    stopAnimation = window.startLightningBoot(canvas, function () { enterDialogStage(null); });
+    stopAnimation = window.startLightningBoot(canvas, function () { finishIntro(null); });
   }
-  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });
-  else start();
+
+  // 顶栏 logo 与菜单中的重播入口共用相同的播放和清理流程。
+  function replayIntro() {
+    if (window.__PSU_NOANIM || print.matches) return;
+    if (root.classList.contains('psu-boot-active') || root.classList.contains('psu-boot-hold')) return;
+    done = false;
+    staged = false;
+    hadVideo = false;
+    root.classList.add('psu-boot-active', 'psu-boot-pending', 'psu-boot-replaying');
+    watchPlayback(true);
+    var canvas = document.querySelector('.psu-boot-canvas');
+    if (canvas && window.startLightningBoot) {
+      holdInput();
+      hadVideo = true;
+      root.classList.add('psu-boot-running');
+      stopAnimation = window.startLightningBoot(canvas, function () { finishIntro(null); });
+    } else {
+      finishIntro(null);
+    }
+  }
+
+  /* 事件委托。启动/重播期间 logo 的点击会被 onSkip 的捕获阶段先拦下
+     （stopImmediatePropagation 挡住后续冒泡），不会递归触发重播；
+     收尾后 onSkip 已摘除，这里才接管。 */
+  document.addEventListener('click', function (event) {
+    var t = event.target;
+    if (!t || !t.closest) return;
+    if (t.closest('.logo') || t.closest('#btnReplayIntro')) replayIntro();
+  });
+
+  if (!motion.matches) {
+    watchPlayback();
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });
+    else start();
+  }
 })();
 
-/* 用户改变选项后提供局部确认；不订阅结果重算，避免批量渲染闪烁。 */
+/* 参考澎湃 OS 的连续响应。独立呈现层：从当前帧接续，不改文本或计算结果。 */
 (function () {
+  'use strict';
   var reduced = window.matchMedia('(prefers-reduced-motion: reduce)');
+  var printing = false;
+  var active = new Map(), pressed = new Set(), folds = new Map(), delayed = new Set();
+  var optionSelector = ':is(.seg, .scenarios, .search-results) > button:enabled';
+  var ENTER = 'cubic-bezier(.16, 1, .3, 1)', FAST = 'cubic-bezier(.2, 0, .2, 1)';
+  var EXIT = 'cubic-bezier(.4, 0, 1, 1)';
+  function enabled(surface) {
+    return !reduced.matches && !printing && !document.hidden && !matchMedia('print').matches &&
+      (surface || !document.documentElement.classList.contains('psu-boot-active'));
+  }
+  function stop(el) {
+    var old = active.get(el);
+    if (old) { active.delete(el); old.cancel(); }
+  }
+  function play(el, frames, duration, easing, done, hold, delay) {
+    if (!el || typeof el.animate !== 'function') return;
+    stop(el);
+    var opts = { duration: duration, easing: easing, fill: delay ? 'both' : 'forwards' };
+    if (delay) opts.delay = delay;
+    var animation = el.animate(frames, opts);
+    active.set(el, animation);
+    animation.finished.then(function () {
+      if (active.get(el) !== animation) return;
+      if (hold) return;
+      active.delete(el);
+      if (done) done();
+      animation.cancel();
+    }, function () { if (active.get(el) === animation) active.delete(el); });
+  }
+  function parseMetricNumber(text) {
+    var m = String(text || '').match(/[-+]?\d+(?:\.\d+)?/);
+    return m ? Number(m[0]) : NaN;
+  }
+  function pulse(el) {
+    if (!enabled() || !el || !el.isConnected || !el.getClientRects().length) return;
+    var style = getComputedStyle(el), running = active.has(el);
+    play(el, [
+      { opacity: running ? style.opacity : .82, transform: running ? style.transform : 'translateY(3px)' },
+      { opacity: 1, transform: 'none' }
+    ], 260, ENTER);
+  }
+  function pulseMetric(el, dir, firstResult) {
+    if (!enabled() || !el || !el.isConnected || !el.getClientRects().length) return;
+    var style = getComputedStyle(el), running = active.has(el);
+    if (firstResult) {
+      play(el, [
+        { opacity: running ? style.opacity : .55, transform: running ? style.transform : 'translateY(8px) scale(.97)' },
+        { opacity: 1, transform: 'translateY(-1px) scale(1.015)', offset: .58 },
+        { opacity: 1, transform: 'none', offset: 1 }
+      ], 340, ENTER);
+      return;
+    }
+    if (dir > 0) {
+      play(el, [
+        { opacity: running ? style.opacity : .72, transform: running ? style.transform : 'translateY(6px) scale(.985)' },
+        { opacity: 1, transform: 'translateY(-1px) scale(1.01)', offset: .6 },
+        { opacity: 1, transform: 'none', offset: 1 }
+      ], 290, ENTER);
+      return;
+    }
+    if (dir < 0) {
+      play(el, [
+        { opacity: running ? style.opacity : .72, transform: running ? style.transform : 'translateY(-5px) scale(1.01)' },
+        { opacity: 1, transform: 'translateY(1px) scale(.996)', offset: .62 },
+        { opacity: 1, transform: 'none', offset: 1 }
+      ], 270, ENTER);
+      return;
+    }
+    pulse(el);
+  }
+  function staggerVisible(nodes, step, maxDelay, duration, yOffset) {
+    if (!enabled() || !nodes || !nodes.length) return;
+    nodes.forEach(function (el, idx) {
+      if (!el || !el.isConnected || !el.getClientRects().length) return;
+      play(el, [
+        { opacity: 0, transform: 'translateY(' + yOffset + 'px) scale(.99)' },
+        { opacity: 1, transform: 'none' }
+      ], duration, ENTER, null, false, Math.min(idx * step, maxDelay));
+    });
+  }
+  function revealPage(skipped) {
+    if (!enabled()) return;
+    var vh = window.innerHeight || 900;
+    var list = window.__PSU_BOOT__ && window.__PSU_BOOT__.items
+      ? window.__PSU_BOOT__.items()
+      : Array.prototype.slice.call(document.querySelectorAll('header.top, .page-intro, .decision-toolbar, .col-config > .card, .col-result .sticky-col > *:not(.print-only)'));
+    var visible = list.filter(function (el) {
+      if (el.matches && el.matches('header.top')) return false;
+      var r = el.getBoundingClientRect();
+      return r.height > 0 && r.top < vh + 100 && r.bottom > -40;
+    }).slice(0, 8);
+    staggerVisible(visible, skipped ? 22 : 34, skipped ? 140 : 220, skipped ? 250 : 320, 10);
+  }
+  function press(el) {
+    if (!enabled() || !el || el.disabled || el.getAttribute('aria-disabled') === 'true' || pressed.has(el)) return;
+    pressed.add(el);
+    var scale = el.matches(optionSelector) ? .965 : .975;
+    play(el, [{ transform: getComputedStyle(el).transform }, { transform: 'scale(' + scale + ')' }], 80, FAST, null, true);
+  }
+  function release(el) {
+    if (!pressed.delete(el)) return;
+    if (!el.isConnected) { stop(el); return; }
+    if (!enabled()) { stop(el); return; }
+    // 从当前按压帧起跳，四段阻尼过冲回弹，保持连点不断帧。
+    var isOption = el.matches(optionSelector);
+    play(el, [
+      { transform: getComputedStyle(el).transform, offset: 0 },
+      { transform: isOption ? 'scale(1.018)' : 'scale(1.008)', offset: .45 },
+      { transform: isOption ? 'scale(.996)' : 'scale(.998)', offset: .76 },
+      { transform: 'scale(1)', offset: 1 }
+    ], isOption ? 320 : 380, ENTER);
+  }
+  function releaseAll() { Array.from(pressed).forEach(release); }
+  function buttonFrom(event) { return event.target.closest && event.target.closest('button, .btn'); }
+  document.addEventListener('pointerdown', function (event) {
+    if (event.isPrimary && event.button === 0) press(buttonFrom(event));
+  });
+  document.addEventListener('pointerup', releaseAll);
+  document.addEventListener('pointercancel', releaseAll);
+  document.addEventListener('pointerout', function (event) {
+    var button = buttonFrom(event);
+    if (button && (!event.relatedTarget || !button.contains(event.relatedTarget))) release(button);
+  });
+  document.addEventListener('keydown', function (event) {
+    if (!event.repeat && (event.key === ' ' || event.key === 'Enter')) press(buttonFrom(event));
+  });
+  document.addEventListener('keyup', function (event) { if (event.key === ' ' || event.key === 'Enter') releaseAll(); });
+  window.addEventListener('blur', releaseAll);
+
+  function surface(el, opening) {
+    if (!el || !enabled(true)) return;
+    var current = getComputedStyle(el), running = active.has(el);
+    if (opening) {
+      play(el, [
+        { opacity: running ? current.opacity : 0,
+          transform: running ? current.transform : 'translateY(14px) scale(.96)' },
+        { opacity: 1, transform: 'translateY(-1px) scale(1.005)', offset: .68 },
+        { opacity: 1, transform: 'none', offset: 1 }
+      ], 360, ENTER);
+    } else {
+      play(el, [
+        { opacity: running ? current.opacity : 1,
+          transform: running ? current.transform : 'none' },
+        { opacity: 0, transform: 'translateY(8px) scale(.975)' }
+      ], 180, EXIT, null, true);
+    }
+  }
+
+  function toggleMenu(el, summary, opening, focusSummary) {
+    var panel = el.querySelector('.header-more-panel');
+    if (!panel || typeof panel.animate !== 'function') return false;
+    var old = folds.get(el);
+    if (old && old.opening === opening) return true;
+    var panelFrame = null;
+    if (old) {
+      var style = getComputedStyle(panel);
+      panelFrame = { opacity: style.opacity, transform: style.transform };
+      old.restore();
+    }
+    var expanded = summary ? summary.getAttribute('aria-expanded') : null;
+    var record = {
+      opening: opening,
+      restore: function () {
+        stop(panel);
+        if (summary) {
+          if (expanded === null) summary.removeAttribute('aria-expanded');
+          else summary.setAttribute('aria-expanded', expanded);
+        }
+        folds.delete(el);
+      },
+      finish: function () {
+        el.open = opening;
+        record.restore();
+      }
+    };
+    if (!opening && (focusSummary || el.contains(document.activeElement)) && summary && summary.focus) {
+      summary.focus({ preventScroll: true });
+    }
+    el.open = true;
+    if (summary) summary.setAttribute('aria-expanded', String(opening));
+    folds.set(el, record);
+    if (opening) {
+      play(panel, [
+        panelFrame || { opacity: 0, transform: 'translateY(-6px) scale(.95)' },
+        { opacity: 1, transform: 'translateY(1px) scale(1.006)', offset: .68 },
+        { opacity: 1, transform: 'none', offset: 1 }
+      ], 260, ENTER, record.finish);
+    } else {
+      play(panel, [
+        panelFrame || { opacity: 1, transform: 'none' },
+        { opacity: 0, transform: 'translateY(-4px) scale(.96)' }
+      ], 150, EXIT, record.finish);
+    }
+    return true;
+  }
+
+  function closeDetails(el, focusSummary) {
+    if (!el || el.tagName !== 'DETAILS' || !el.open) return false;
+    if (!enabled() || !el.matches('.header-more')) return false;
+    return toggleMenu(el, el.querySelector('summary'), false, focusSummary);
+  }
+  window.__PSU_MOTION__ = {
+    surface: surface,
+    stop: stop,
+    revealPage: revealPage,
+    closeDetails: closeDetails
+  };
+
+  document.addEventListener('change', function (event) {
+    var input = event.target;
+    if (!input.matches || !input.matches('select, input[type="checkbox"], input[type="radio"], input[type="number"]')) return;
+    pulse(input.closest('.switch')?.querySelector('.track') || input);
+  });
+
+  // 原生 details 的最终结构不变；仅在过渡期间固定高度，快速反向从当前高度接续。
+  document.addEventListener('click', function (event) {
+    var summary = event.target.closest && event.target.closest('summary');
+    var el = summary && summary.parentElement;
+    if (!el || el.tagName !== 'DETAILS' || event.defaultPrevented ||
+        event.target.closest('button, a, input, select, textarea') || !enabled() || typeof el.animate !== 'function') return;
+    if (el.matches('.header-more')) {
+      var oldMenu = folds.get(el);
+      var menuOpening = oldMenu ? !oldMenu.opening : !el.open;
+      if (toggleMenu(el, summary, menuOpening, false)) event.preventDefault();
+      return;
+    }
+    event.preventDefault();
+    var old = folds.get(el), opening = old ? !old.opening : !el.open;
+    var start = el.getBoundingClientRect().height;
+    var contentFrames = new Map();
+    if (old) Array.from(el.children).forEach(function (child) {
+      var style = getComputedStyle(child); contentFrames.set(child, { opacity: style.opacity, transform: style.transform });
+    });
+    if (old) old.restore();
+    stop(el);
+    var height = el.style.height, overflow = el.style.overflow, expanded = summary.getAttribute('aria-expanded');
+    var contents = Array.from(el.children).filter(function (child) { return child !== summary; });
+    var record = { opening: opening, restore: function () {
+      stop(el); contents.forEach(stop); el.style.height = height; el.style.overflow = overflow;
+      if (expanded === null) summary.removeAttribute('aria-expanded'); else summary.setAttribute('aria-expanded', expanded);
+      folds.delete(el);
+    }, finish: function () { record.restore(); el.open = opening; } };
+    if (!opening && el.contains(document.activeElement)) summary.focus({ preventScroll: true });
+    el.open = opening;
+    var end = el.getBoundingClientRect().height;
+    if (!opening) el.open = true;
+    summary.setAttribute('aria-expanded', String(opening));
+    el.style.overflow = 'hidden';
+    folds.set(el, record);
+    var delta = Math.abs(end - start);
+    if (delta > 1800) { record.finish(); return; }
+    var openDur = Math.min(400, Math.max(240, Math.round(210 + delta * .28)));
+    var closeDur = Math.min(280, Math.max(170, Math.round(150 + delta * .16)));
+    contents.forEach(function (child) {
+      play(child, [contentFrames.get(child) || { opacity: opening ? 0 : 1, transform: opening ? 'translateY(-6px)' : 'none' },
+        { opacity: opening ? 1 : 0, transform: opening ? 'none' : 'translateY(-4px)' }], opening ? openDur : closeDur, opening ? ENTER : FAST, null, !opening);
+    });
+    play(el, [{ height: start + 'px' }, { height: end + 'px' }], opening ? openDur : closeDur, opening ? ENTER : FAST, record.finish);
+  });
+
   function clear() {
+    delayed.forEach(cancelAnimationFrame); delayed.clear();
+    Array.from(folds.values()).forEach(function (record) { record.finish(); });
+    active.forEach(function (animation) { animation.cancel(); }); active.clear(); pressed.clear();
     document.querySelectorAll('.psu-ui-feedback').forEach(function (el) { el.classList.remove('psu-ui-feedback'); });
   }
-  document.addEventListener('change', function (event) {
-    if (reduced.matches || document.documentElement.classList.contains('psu-boot-active')) return;
-    var input = event.target;
-    if (!input.matches('select, input[type="checkbox"], input[type="radio"], input[type="number"]')) return;
-    var target = input.closest('.switch') || input;
-    target.classList.remove('psu-ui-feedback');
-    void target.offsetWidth; // 重新触发有限动画；快速连续切换也只保留当前反馈。
-    target.classList.add('psu-ui-feedback');
-  });
-  document.addEventListener('animationend', function (event) {
-    if (event.animationName === 'psu-ui-feedback') event.target.classList.remove('psu-ui-feedback');
-  });
   reduced.addEventListener('change', clear);
-  window.addEventListener('beforeprint', clear);
+  document.addEventListener('visibilitychange', function () { if (document.hidden) clear(); });
+  window.addEventListener('beforeprint', function () { printing = true; clear(); });
+  window.addEventListener('afterprint', function () { printing = false; });
+
+  var cursorLight = null, pointerSurface = null, pointerFrame = 0, pointerX = null, pointerY = 0;
+  var pointerOption = null, pointerTarget = null;
+  var surfaceRect = null, surfaceOW = 0, surfaceOH = 0, surfaceDirty = true, surfaceEnteredAt = 0;
+  var lightingRoot = document.documentElement;
+  var printMedia = matchMedia('print');
+  function lightingEnabled() {
+    return lightingRoot.dataset.lightEffects !== 'off' && !printing && !document.hidden &&
+      !printMedia.matches && !lightingRoot.classList.contains('psu-boot-active') &&
+      !lightingRoot.classList.contains('psu-boot-pending');
+  }
+  function clearSurfaceLight() {
+    if (!pointerSurface) return;
+    pointerSurface.style.removeProperty('--spot-x');
+    pointerSurface.style.removeProperty('--spot-y');
+    pointerSurface.removeAttribute('data-spotlight');
+    pointerSurface = null;
+    surfaceRect = null;
+    surfaceDirty = true;
+  }
+  function setOptionLight(option) {
+    if (pointerOption === option) return;
+    if (pointerOption) pointerOption.removeAttribute('data-option-light');
+    pointerOption = option;
+    if (!option) return;
+    var bounds = option.getBoundingClientRect();
+    var origin = (pointerX - bounds.left) / bounds.width * 100;
+    option.style.setProperty('--option-light-x', origin + '%');
+    option.setAttribute('data-option-light', '');
+  }
+  function clearSpotlight() {
+    if (pointerFrame) cancelAnimationFrame(pointerFrame);
+    pointerFrame = 0;
+    pointerX = null;
+    pointerTarget = null;
+    if (cursorLight) cursorLight.removeAttribute('data-active');
+    clearSurfaceLight();
+    setOptionLight(null);
+  }
+  function queueSpotlight() {
+    if (pointerFrame || pointerX === null) return;
+    pointerFrame = requestAnimationFrame(function () {
+      pointerFrame = 0;
+      if (!lightingEnabled()) { clearSpotlight(); return; }
+      var hit = pointerTarget || document.elementFromPoint(pointerX, pointerY);
+      setOptionLight(hit?.closest(optionSelector) || null);
+      var hoveredSurface = hit?.closest('.layout .card, .reco');
+      if (!hoveredSurface) {
+        cursorLight.style.transform = 'translate3d(' + pointerX + 'px,' + pointerY + 'px,0) translate(-50%,-50%)';
+      }
+      cursorLight.toggleAttribute('data-active', !hoveredSurface);
+      if (pointerSurface !== hoveredSurface) {
+        clearSurfaceLight();
+        if (hoveredSurface) {
+          pointerSurface = hoveredSurface;
+          surfaceEnteredAt = performance.now();
+          surfaceDirty = true;
+        }
+      }
+      if (!hoveredSurface) return;
+      // 悬停入场弹性缩放（约 420ms）与滚动/尺寸变动期间实时测 rect，稳定后复用缓存避免重复回流
+      if (surfaceDirty || !surfaceRect || (performance.now() - surfaceEnteredAt < 500)) {
+        surfaceRect = pointerSurface.getBoundingClientRect();
+        surfaceOW = pointerSurface.offsetWidth;
+        surfaceOH = pointerSurface.offsetHeight;
+        surfaceDirty = false;
+      }
+      pointerSurface.style.setProperty('--spot-x', ((pointerX - surfaceRect.left) * surfaceOW / surfaceRect.width) + 'px');
+      pointerSurface.style.setProperty('--spot-y', ((pointerY - surfaceRect.top) * surfaceOH / surfaceRect.height) + 'px');
+      if (!pointerSurface.hasAttribute('data-spotlight')) pointerSurface.setAttribute('data-spotlight', '');
+    });
+  }
+  document.addEventListener('pointermove', function (event) {
+    if (!cursorLight || (event.pointerType !== 'mouse' && event.pointerType !== 'pen')) return;
+    if (!lightingEnabled()) { clearSpotlight(); return; }
+    pointerX = event.clientX;
+    pointerY = event.clientY;
+    pointerTarget = event.target instanceof Element ? event.target : null;
+    queueSpotlight();
+  }, { passive: true });
+  document.addEventListener('scroll', function () {
+    pointerTarget = null;
+    surfaceDirty = true;
+    queueSpotlight();
+  }, { capture: true, passive: true });
+  window.addEventListener('resize', function () { surfaceDirty = true; }, { passive: true });
+  document.documentElement.addEventListener('pointerleave', clearSpotlight);
+  window.addEventListener('blur', clearSpotlight);
+  document.addEventListener('visibilitychange', clearSpotlight);
+  window.addEventListener('beforeprint', clearSpotlight);
+
+  function setupSelectionTrack(group) {
+    var previous = null, previousTop = null, geometry = '';
+    var scenario = group.classList.contains('scenarios');
+    function sync() {
+      var selected = group.querySelector(':scope > button[aria-pressed="true"]');
+      if (!selected || !selected.offsetWidth) {
+        group.removeAttribute('data-selection-ready');
+        group.removeAttribute('data-selection-moving');
+        previous = null;
+        geometry = '';
+        return;
+      }
+      var top = selected.offsetTop;
+      var width = selected.offsetWidth;
+      var inset = scenario ? Math.round(width * .12) : 6;
+      var x = selected.offsetLeft + inset;
+      var y = top + selected.offsetHeight - (scenario ? 6 : 2);
+      var nextGeometry = x + ',' + y + ',' + width;
+      if (selected === previous && nextGeometry === geometry) return;
+      var rowSwitched = !!previous && selected !== previous && top !== previousTop;
+      group.toggleAttribute('data-selection-moving', !!previous && selected !== previous && top === previousTop);
+      group.style.setProperty('--selection-x', x + 'px');
+      group.style.setProperty('--selection-y', y + 'px');
+      group.style.setProperty('--selection-width', (width - inset * 2) + 'px');
+      group.setAttribute('data-selection-ready', '');
+      previous = selected;
+      previousTop = top;
+      geometry = nextGeometry;
+      if (rowSwitched && !active.has(selected) && !pressed.has(selected)) pulse(selected);
+    }
+    // Establish the group's offset origin before reading button coordinates.
+    group.classList.add('selection-group');
+    new MutationObserver(sync).observe(group, { subtree: true, childList: true, attributes: true, attributeFilter: ['aria-pressed'] });
+    if (typeof ResizeObserver === 'function') new ResizeObserver(sync).observe(group);
+    else window.addEventListener('resize', sync);
+    document.fonts?.ready.then(sync);
+    sync();
+  }
+
+  function setup() {
+    cursorLight = document.querySelector('.site-cursor-light');
+    var lightControl = document.getElementById('btnLightEffects');
+    if (lightControl) {
+      var lightsOn = true;
+      try { lightsOn = localStorage.getItem('psu-light-effects') !== 'off'; } catch {}
+      function syncLights() {
+        lightingRoot.dataset.lightEffects = lightsOn ? 'on' : 'off';
+        lightControl.setAttribute('aria-pressed', String(lightsOn));
+        lightControl.querySelector('span').textContent = lightsOn ? '：开启' : '：关闭';
+        if (!lightsOn) clearSpotlight();
+      }
+      syncLights();
+      lightControl.addEventListener('click', function () {
+        lightsOn = !lightsOn;
+        try { localStorage.setItem('psu-light-effects', lightsOn ? 'on' : 'off'); } catch {}
+        syncLights();
+      });
+    }
+    document.querySelectorAll('.seg, .scenarios').forEach(setupSelectionTrack);
+    if (typeof document.documentElement.animate === 'function') document.documentElement.classList.add('psu-motion-ready');
+    ['recoBig', 'heroPower', 'heroExpected', 'heroTransient', 'answerChipValue', 'mobileBarValue'].forEach(function (id) {
+      var target = document.getElementById(id);
+      if (!target) return;
+      var lastText = target.textContent;
+      var lastNum = parseMetricNumber(lastText);
+      new MutationObserver(function () {
+        var value = target.textContent;
+        if (value === lastText) return;
+        var num = parseMetricNumber(value);
+        var firstResult = !Number.isFinite(lastNum) && Number.isFinite(num);
+        var dir = Number.isFinite(lastNum) && Number.isFinite(num) && num !== lastNum ? (num > lastNum ? 1 : -1) : 0;
+        lastText = value;
+        lastNum = num;
+        pulseMetric(target, dir, firstResult);
+      }).observe(target, { childList: true, subtree: true, characterData: true });
+    });
+    var chip = document.getElementById('answerChip');
+    if (chip) {
+      var chipHidden = chip.hidden;
+      new MutationObserver(function () {
+        var hidden = chip.hidden;
+        if (hidden === chipHidden) return;
+        chipHidden = hidden;
+        if (!hidden && enabled()) {
+          play(chip, [
+            { opacity: 0, transform: 'translateY(-4px) scale(.96)' },
+            { opacity: 1, transform: 'none' }
+          ], 260, ENTER);
+        }
+      }).observe(chip, { attributes: true, attributeFilter: ['hidden'] });
+    }
+    var lastMode = document.documentElement.dataset.calcMode;
+    new MutationObserver(function () {
+      var nextMode = document.documentElement.dataset.calcMode;
+      if (nextMode === lastMode) return;
+      var prevMode = lastMode;
+      lastMode = nextMode;
+      if (nextMode === 'full' && prevMode === 'quick' && enabled()) {
+        var rafId = requestAnimationFrame(function () {
+          delayed.delete(rafId);
+          if (!enabled() || document.documentElement.dataset.calcMode !== 'full') return;
+          var vh = window.innerHeight || 900;
+          var cards = Array.prototype.filter.call(
+            document.querySelectorAll('.col-config > .card[data-detail-part]'),
+            function (card) {
+              var r = card.getBoundingClientRect();
+              return r.height > 0 && r.top < vh * 2;
+            }
+          ).slice(0, 6);
+          staggerVisible(cards, 36, 180, 290, 10);
+        });
+        delayed.add(rafId);
+      }
+    }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-calc-mode'] });
+    ['hardwareResults', 'cpuSearchResults', 'gpuSearchResults'].forEach(function (id) {
+      var container = document.getElementById(id);
+      if (!container) return;
+      new MutationObserver(function (records) {
+        if (!enabled()) return;
+        var added = [];
+        records.forEach(function (rec) {
+          rec.addedNodes.forEach(function (node) {
+            if (node.nodeType === 1 && node.matches('button')) added.push(node);
+          });
+        });
+        if (added.length) staggerVisible(added.slice(0, 8), 18, 120, 220, 6);
+      }).observe(container, { childList: true });
+    });
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', setup, { once: true });
+  else setup();
 })();
 
 /* 结果分层只整理呈现，不改计算；保留用户主动展开的风险详情。 */
@@ -720,13 +1161,6 @@
         specs.forEach(function (el) { detail.appendChild(el); });
         pick.appendChild(detail);
       });
-      var explanation = root.querySelector('.explain-content');
-      var previous = explanation.querySelector('.recommendation-math');
-      var formula = root.querySelector('#recoSub > span');
-      if (formula) {
-        if (previous) previous.remove();
-        formula.classList.add('recommendation-math'); explanation.appendChild(formula);
-      } else if (!root.querySelector('#recoSub b') && previous) previous.remove();
       root.querySelectorAll('.result-fold').forEach(function (fold) {
         var summary = fold.querySelector('summary'), status = summary.querySelector('.fold-status');
         if (!status) { status = document.createElement('span'); status.className = 'fold-status'; summary.appendChild(status); }
@@ -755,26 +1189,6 @@
       observer.observe(root, { childList: true, subtree: true, characterData: true });
     }
     refresh();
-  }
-  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', setup, { once: true });
-  else setup();
-})();
-
-/* 推荐数值真实变化时做一次局部反馈；不滚动数字，不修改结果。 */
-(function () {
-  function setup() {
-    var target = document.getElementById('recoBig');
-    if (!target) return;
-    var last = target.textContent;
-    new MutationObserver(function () {
-      var value = target.textContent;
-      if (value === last) return;
-      last = value;
-      if (matchMedia('(prefers-reduced-motion: reduce)').matches || document.documentElement.classList.contains('psu-boot-active')) return;
-      target.classList.remove('psu-ui-feedback');
-      void target.offsetWidth;
-      target.classList.add('psu-ui-feedback');
-    }).observe(target, { childList: true, subtree: true, characterData: true });
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', setup, { once: true });
   else setup();
